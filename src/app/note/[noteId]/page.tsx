@@ -1,20 +1,19 @@
 // app/note/[noteId]/page.tsx
 "use client";
 
-import { use } from "react"; // ✅ Next.js 15 / React 19: params 언래핑
+import { use } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as yorkie from "@yorkie-js/sdk";
 
-// 🔧 env를 문자열로 고정(타입 경고 제거)
-const RPC_ADDR = process.env.NEXT_PUBLIC_YORKIE_RPC_ADDR as string;
+// ==== env (빌드 시 주입) ====
+const ENV_RPC = process.env.NEXT_PUBLIC_YORKIE_RPC_ADDR as string | undefined;
 const API_KEY = process.env.NEXT_PUBLIC_YORKIE_API_KEY as string;
 const USER_API = process.env.NEXT_PUBLIC_USER_API as string;
 
-// 초기엔 content가 없을 수 있음 → optional
+// ---- 유틸 ----
 type DocType = { content?: yorkie.Text };
 type Presence = { name: string; color: string };
 
-// 문자열 줄임 표시
 const short = (s?: string | null, head = 12, tail = 8) =>
   !s
     ? ""
@@ -22,14 +21,10 @@ const short = (s?: string | null, head = 12, tail = 8) =>
     ? s
     : `${s.slice(0, head)}…${s.slice(-tail)}`;
 
-// ── ✅ 세션 전용 토큰 유틸 ─────────────────────────────────────────
 const getAccessToken = () => sessionStorage.getItem("accessToken") ?? "";
-const setAccessToken = (value: string) =>
-  sessionStorage.setItem("accessToken", value);
+const setAccessToken = (v: string) => sessionStorage.setItem("accessToken", v);
 const clearAccessToken = () => sessionStorage.removeItem("accessToken");
-const readTokenPreview = () => short(sessionStorage.getItem("accessToken"));
 
-// Base64URL → JSON 디코드 (JWT payload용)
 function decodeJwtPayload(token: string): any | null {
   try {
     const [, payload] = token.split(".");
@@ -44,23 +39,22 @@ function decodeJwtPayload(token: string): any | null {
   }
 }
 
+// ==== 컴포넌트 ====
 export default function NotePage({
   params,
 }: {
   params: Promise<{ noteId: string }>;
 }) {
-  // ✅ params Promise 언래핑
   const { noteId } = use(params);
 
+  const [rpcAddr, setRpcAddr] = useState<string>("");
   const [role, setRole] = useState<"OWNER" | "WRITER" | "READER" | null>(null);
   const [status, setStatus] = useState("idle");
   const [error, setError] = useState("");
 
-  // 디버그/표시용 상태
   const [debug, setDebug] = useState<string[]>([]);
   const [tokenPreview, setTokenPreview] = useState<string>("");
 
-  // API 상태 카드용
   const [permApi, setPermApi] = useState<{
     ok?: boolean;
     status?: number;
@@ -81,14 +75,12 @@ export default function NotePage({
     at?: string;
   }>({});
 
-  // Yorkie 토큰 & 클레임/만료정보
   const [yorkieToken, setYorkieToken] = useState<string>("");
   const [yorkieClaims, setYorkieClaims] = useState<any>(null);
-  const [tokenTimeLeft, setTokenTimeLeft] = useState<number | null>(null); // seconds
+  const [tokenTimeLeft, setTokenTimeLeft] = useState<number | null>(null);
 
   const dockey = useMemo(() => `note-${noteId}`, [noteId]);
 
-  // 🔧 useRef는 null로 초기화
   const clientRef = useRef<yorkie.Client | null>(null);
   const docRef = useRef<yorkie.Document<DocType, Presence> | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -97,11 +89,27 @@ export default function NotePage({
   const log = (m: string) =>
     setDebug((prev) => [`[${nowStr()}] ${m}`, ...prev]);
 
-  // ───────────────────────────────────────────────────────────────
-  // 0) 세션 토큰 미리보기
+  // 0) env → rpcAddr 결정 (쿼리스트링 rpc= 로 덮어쓰기 가능)
   useEffect(() => {
-    setTokenPreview(readTokenPreview() || "");
+    const qs =
+      typeof window !== "undefined"
+        ? new URLSearchParams(window.location.search)
+        : null;
+    const override = qs?.get("rpc") || "";
+    const finalRpc = override || ENV_RPC || "https://api.yorkie.dev";
+    setRpcAddr(finalRpc);
+    console.info(
+      "[Yorkie] rpcAddr =",
+      finalRpc,
+      "| apiKey set? =",
+      Boolean(API_KEY),
+      "| USER_API =",
+      USER_API
+    );
   }, []);
+
+  // 0-1) 세션 토큰 프리뷰
+  useEffect(() => setTokenPreview(short(getAccessToken()) || ""), []);
 
   const setJwt = () => {
     const el = document.getElementById(
@@ -109,7 +117,7 @@ export default function NotePage({
     ) as HTMLInputElement | null;
     if (el?.value) {
       setAccessToken(el.value);
-      setTokenPreview(readTokenPreview() || "");
+      setTokenPreview(short(el.value) || "");
       alert("세션에 JWT 저장 완료! 새로고침(F5) 하세요.");
     }
   };
@@ -119,113 +127,73 @@ export default function NotePage({
     alert("세션에서 JWT 삭제됨.");
   };
 
-  // ───────────────────────────────────────────────────────────────
-  // 1) 내 권한 조회
+  // 1) 권한 조회
   useEffect(() => {
     (async () => {
-      // ⬅️ DEBUG: API 호출 시작점에 로그 추가
-      console.log(`[DEBUG] 1. 권한 조회를 시작합니다. noteId: ${noteId}`);
+      console.log(`[DEBUG] 1. 권한 조회 시작. noteId: ${noteId}`);
       try {
         setStatus("권한 확인 중...");
         log(`GET /permission/${noteId}/me`);
-        const res = await fetch(`${USER_API}/api/v1/permission/${noteId}/me`, {
+        const res = await fetch(`${USER_API}/permission/${noteId}/me`, {
           headers: { Authorization: `Bearer ${getAccessToken()}` },
         });
         log(`permission/me → ${res.status}`);
         setPermApi({ ok: res.ok, status: res.status, at: nowStr() });
-
-        // ⬅️ DEBUG: 응답 상태 로그 추가
-        console.log(
-          `[DEBUG] 2. 권한 API 응답 받음. Status: ${res.status}`,
-          res
-        );
-
-        if (!res.ok) {
-          // ⬅️ DEBUG: 실패 시 에러 로그 강화
-          console.error(`[DEBUG] 🚨 권한 API 호출 실패! Status: ${res.status}`);
-          throw new Error(`permission/me failed: ${res.status}`);
-        }
+        if (!res.ok) throw new Error(`permission/me failed: ${res.status}`);
 
         const body = await res.json();
-
-        // ⬅️ DEBUG: 응답 본문 전체를 로그로 확인
-        console.log("[DEBUG] 3. 권한 API 응답 본문(body):", body);
-
+        console.log("[DEBUG] 권한 API 본문:", body);
         const userRole = body.data?.role ?? null;
-
-        // ⬅️ DEBUG: 추출된 role 값과 상태 변경 전 로그
-        console.log(
-          `[DEBUG] 4. 응답에서 추출된 role: ${userRole}. 이제 state를 업데이트합니다.`
-        );
-
+        console.log(`[DEBUG] 추출된 role: ${userRole}`);
         setRole(userRole);
         setStatus("권한 확인 완료");
       } catch (e: any) {
-        // ⬅️ DEBUG: try-catch 블록에서 에러 발생 시 로그
-        console.error("[DEBUG] 🚨 권한 조회 중 예외 발생!", e);
+        console.error("[DEBUG] 권한 조회 예외!", e);
         setError(String(e?.message ?? e));
         setStatus("권한 조회 실패");
         setPermApi((p) => ({ ...p, ok: false, at: nowStr() }));
         log(`permission/me error: ${String(e)}`);
       }
     })();
-  }, [noteId]);
+  }, [noteId, USER_API]);
 
-  // Yorkie 토큰 만료 카운트다운
+  // Yorkie 토큰 남은 시간 표시
   useEffect(() => {
     if (!yorkieToken) return;
     const claims = decodeJwtPayload(yorkieToken);
     setYorkieClaims(claims);
-    let timer: any;
-    const tick = () => {
+    const timer = setInterval(() => {
       if (claims?.exp) {
         const left = Math.max(0, claims.exp - Math.floor(Date.now() / 1000));
         setTokenTimeLeft(left);
       }
-    };
-    tick();
-    timer = setInterval(tick, 1000);
+    }, 1000);
     return () => clearInterval(timer);
   }, [yorkieToken]);
 
-  // ───────────────────────────────────────────────────────────────
-  // 2) Yorkie client + document attach
+  // 2) Yorkie client + attach
   useEffect(() => {
-    // ⬅️ DEBUG: Yorkie 로직의 실행 조건(role) 확인
-    console.log(`[DEBUG] 5. Yorkie 로직 실행 여부 확인. 현재 role: "${role}"`);
-
+    console.log(
+      `[DEBUG] 5. Yorkie 실행 조건 확인. role="${role}", rpcAddr="${rpcAddr}"`
+    );
     if (!role) {
-      // ⬅️ DEBUG: role이 없어서 실행이 중단될 때 로그
-      if (role === null) {
-        console.warn(
-          "[DEBUG] ⚠️ role이 null입니다. Yorkie 로직을 건너뜁니다. (권한이 없거나 API 응답 구조 문제일 수 있습니다)"
-        );
-      }
+      if (role === null) console.warn("[DEBUG] role=null → Yorkie 로직 건너뜀");
       return;
     }
-
-    // ⬅️ DEBUG: Yorkie 로직이 실제로 시작될 때 로그
-    console.log("[DEBUG] ✅ role 확인 완료. Yorkie 연결을 시작합니다.");
+    if (!rpcAddr) return; // 아직 env 결정 전
 
     (async () => {
       try {
         setStatus("Yorkie 연결 중...");
         log("Yorkie Client 생성 시도");
 
-        // ⬇️ SDK 버전에 따라 생성자 시그니처가 다름을 대비
-        const ClientCtor: any = (yorkie as any).Client;
-        let client: yorkie.Client;
-
-        // 공통 authTokenInjector
+        // 인증 토큰 인젝터: 웹훅 실패/만료 시 서버로부터 yorkie-token 재발급
         const authTokenInjector = async (reason?: string) => {
-          // ⬅️ DEBUG: 가장 중요한 yorkie/token 호출 직전 로그
           console.log(
-            `[DEBUG] 🚀 드디어 authTokenInjector 실행! POST /yorkie/token 호출합니다. (reason=${
-              reason ?? "n/a"
-            })`
+            `[DEBUG] authTokenInjector 실행. reason=${reason ?? "n/a"}`
           );
           log(`POST /yorkie/token (reason=${reason ?? "n/a"})`);
-          const res = await fetch(`${USER_API}/api/v1/yorkie/token`, {
+          const res = await fetch(`${USER_API}/yorkie/token`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -246,69 +214,44 @@ export default function NotePage({
             );
 
           const payload = await res.json();
-          // 응답 다양한 형태 대비
           const raw = payload?.data ?? payload;
-          let token: string | undefined;
-          let expiresIn: number | undefined;
-          let attrKey: string | undefined;
-          let attrVerb: string | undefined;
-
-          if (raw && typeof raw === "object") {
-            token = raw.token ?? raw?.data ?? raw?.accessToken;
-            expiresIn = raw.expiresIn ?? raw.ttlSeconds;
-            const attrs = raw.documentAttributes ?? raw.documentAttribute;
-            if (attrs) {
-              attrKey = attrs.key;
-              attrVerb = attrs.verb;
-            }
-          } else if (typeof raw === "string") {
-            token = raw;
-          }
-          if (!token) throw new Error("no yorkie token in response");
-
+          const token = raw?.token ?? raw?.data ?? raw?.accessToken;
+          const expiresIn = raw?.expiresIn ?? raw?.ttlSeconds;
+          const attrs = raw?.documentAttributes ?? raw?.documentAttribute;
           setYorkieToken(token);
           setTokenApi({
             ok: true,
             status: res.status,
             at: nowStr(),
             expiresIn,
-            attrKey,
-            attrVerb,
+            attrKey: attrs?.key,
+            attrVerb: attrs?.verb,
           });
           log(
-            `Yorkie token OK (expiresIn=${expiresIn ?? "?"}s, key=${
-              attrKey ?? "-"
-            }, verb=${attrVerb ?? "-"})`
+            `Yorkie token OK (ttl=${expiresIn ?? "?"}s, key=${
+              attrs?.key ?? "-"
+            }, verb=${attrs?.verb ?? "-"})`
           );
-          return token;
+          return token as string;
         };
 
-        try {
-          // 패턴1: new Client(rpcAddr, opts)
-          client = new ClientCtor(RPC_ADDR, {
-            apiKey: API_KEY,
-            authTokenInjector,
-          });
-        } catch {
-          // 패턴2: new Client({ rpcAddr, ... })
-          client = new ClientCtor({
-            rpcAddr: RPC_ADDR,
-            apiKey: API_KEY,
-            authTokenInjector,
-          });
-        }
-
+        // JS SDK 문서 권장: 객체 형태 생성자 사용
+        const client = new yorkie.Client({
+          rpcAddr,
+          apiKey: API_KEY,
+          authTokenInjector,
+        });
         await client.activate();
         clientRef.current = client;
         log("client.activate() 완료");
 
         const doc = new yorkie.Document<DocType, Presence>(dockey);
-        await client.attach(doc); // 옵션 없이(버전 간 타입 충돌 회피)
+        await client.attach(doc);
         docRef.current = doc;
         setAttachState({ attached: true, at: nowStr(), sync: "attached" });
         log(`client.attach(${dockey}) 완료`);
 
-        // 초기 내용 보장
+        // 초기 내용 반영
         doc.update((root) => {
           if (!root.content) root.content = new yorkie.Text();
           const text = root.content.toString();
@@ -316,9 +259,8 @@ export default function NotePage({
             textareaRef.current.value = text;
           }
         });
-        log("문서 초기화 완료");
 
-        // 원격 변경 → textarea 반영
+        // 원격 변경 적용
         doc.subscribe((event: any) => {
           if (event.type === "remote-change") {
             const text = doc.getRoot().content?.toString() ?? "";
@@ -326,7 +268,7 @@ export default function NotePage({
           }
         });
 
-        // 상태/에러 로그
+        // 상태 이벤트
         doc.subscribe("sync", (e: any) => {
           setStatus(`Sync: ${e.value}`);
           setAttachState((s) => ({
@@ -336,6 +278,8 @@ export default function NotePage({
           }));
           log(`sync: ${e.value}`);
         });
+
+        // 인증 에러 이벤트(토큰 만료·권한 부족 등)
         doc.subscribe("auth-error", (e: any) => {
           const msg = `auth-error: method=${e.value.method}, reason=${e.value.reason}`;
           setError(msg);
@@ -345,8 +289,7 @@ export default function NotePage({
 
         setStatus("편집 준비 완료");
       } catch (e: any) {
-        // ⬅️ DEBUG: Yorkie 연결 중 예외 발생 시 로그
-        console.error("[DEBUG] 🚨 Yorkie 연결 중 예외 발생!", e);
+        console.error("[DEBUG] Yorkie 연결 예외!", e);
         setError(String(e?.message ?? e));
         setStatus("Yorkie 연결 실패");
         log(`Yorkie 연결 실패: ${String(e)}`);
@@ -369,9 +312,8 @@ export default function NotePage({
         }
       })();
     };
-  }, [role, dockey, noteId]);
+  }, [role, dockey, noteId, rpcAddr]);
 
-  // ───────────────────────────────────────────────────────────────
   // 3) 입력 핸들러
   const onInput = () => {
     if (!docRef.current || role === "READER") return;
@@ -382,7 +324,6 @@ export default function NotePage({
     });
   };
 
-  // UI helpers
   const badge = (ok?: boolean) =>
     ok === undefined
       ? "bg-gray-200 text-gray-700"
@@ -401,8 +342,8 @@ export default function NotePage({
           <h1 className="text-2xl font-bold text-indigo-600">
             📄 Note #{noteId}
           </h1>
-          <span className="text-sm text-gray-500">
-            dockey: <code>{dockey}</code>
+          <span className="text-xs text-gray-500">
+            dockey: <code>{dockey}</code> | rpc: <code>{rpcAddr || "…"}</code>
           </span>
         </div>
 
@@ -419,16 +360,16 @@ export default function NotePage({
           </span>
         </div>
 
-        {/* 에러 표시 */}
+        {/* 에러 */}
         {error && (
           <div className="bg-red-50 border border-red-200 text-red-600 p-3 rounded-md">
             {error}
           </div>
         )}
 
-        {/* ▶ API 상태 카드들 */}
+        {/* API 카드 */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          {/* 1) Permission */}
+          {/* Permission */}
           <div className="border rounded-lg p-3">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold">1) Permission</h3>
@@ -444,7 +385,7 @@ export default function NotePage({
             </div>
           </div>
 
-          {/* 2) Yorkie Token */}
+          {/* Yorkie Token */}
           <div className="border rounded-lg p-3">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold">2) Yorkie Token</h3>
@@ -469,7 +410,7 @@ export default function NotePage({
             </div>
           </div>
 
-          {/* 3) Attach & Sync */}
+          {/* Attach & Sync */}
           <div className="border rounded-lg p-3">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold">3) Attach & Sync</h3>
@@ -497,7 +438,7 @@ export default function NotePage({
           </div>
         </div>
 
-        {/* ▶ Yorkie JWT 표시/디코드 */}
+        {/* Yorkie JWT */}
         <div className="border rounded-lg p-3">
           <div className="flex items-center justify-between">
             <h3 className="font-semibold">Yorkie JWT</h3>
@@ -539,7 +480,7 @@ export default function NotePage({
           className="w-full h-72 resize-none border border-gray-300 rounded-lg p-4 text-gray-800 focus:outline-none focus:ring-2 focus:ring-indigo-400 font-mono"
         />
 
-        {/* Dev 도구: 세션 토큰 입력/삭제 */}
+        {/* Dev 도구 */}
         <div className="mt-1 flex gap-2 items-center">
           <input
             id="dev-jwt-input"
