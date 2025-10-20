@@ -5,8 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import * as yorkie from "@yorkie-js/sdk";
 
 const RPC_ADDR = "http://localhost:8085"
-const HARDCODED_YORKIE_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJBbGljZSIsIm5vdGVJZCI6IjEwIiwicm9sZSI6IldSSVRFUiIsInZlcmIiOiJydyIsImlhdCI6MTc2MDg5NjgwMywiZXhwIjoxNzYwODk3NDAzfQ.Q7k5IkfSLJ81wlHHcNvu83CNEb_Bumr0XmXBB720J48"
-
+const HARDCODED_YORKIE_TOKEN = ""
 type DocType = { content?: yorkie.Text };
 type Presence = { name: string; color: string };
 type RoleType = "OWNER" | "WRITER" | "READER";
